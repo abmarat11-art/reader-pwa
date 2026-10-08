@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Читалка">
+<meta name="theme-color" content="#f6f1e7">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<title>Читалка</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="light" data-screen="library">
+
+<!-- ============ БИБЛИОТЕКА ============ -->
+<section id="library" class="screen">
+  <header class="lib-head">
+    <h1>Читалка</h1>
+    <label class="btn primary">
+      Добавить книгу
+      <input id="filePick" type="file" accept=".epub,.fb2,.fb2.zip,.zip,application/epub+zip" multiple hidden>
+    </label>
+  </header>
+  <p class="hint">EPUB и FB2 (в т.ч. .fb2.zip). Файлы хранятся на устройстве.</p>
+  <div id="shelf" class="shelf"></div>
+  <div id="libEmpty" class="empty">
+    <div class="empty-ico">📖</div>
+    <p>Пока пусто.<br>Нажми «Добавить книгу» и выбери файл из «Файлов» или iCloud.</p>
+  </div>
+  <footer class="lib-foot">
+    <button class="btn ghost" id="installHint">Как поставить на главный экран</button>
+  </footer>
+</section>
+
+<!-- ============ ЧТЕНИЕ ============ -->
+<section id="reader" class="screen">
+  <div id="viewport" class="viewport">
+    <div class="page" data-rel="-1"><div class="paper"><div class="flow"></div></div></div>
+    <div class="page" data-rel="0"><div class="paper"><div class="flow"></div></div></div>
+    <div class="page" data-rel="1"><div class="paper"><div class="flow"></div></div></div>
+    <div id="scrollView" class="scroll-view"><div class="paper"><div class="flow"></div></div></div>
+    <div id="tapLeft" class="tapzone left"></div>
+    <div id="tapRight" class="tapzone right"></div>
+    <div id="tapMid" class="tapzone mid"></div>
+  </div>
+
+  <div id="hud" class="hud">
+    <div class="hud-top">
+      <button class="icon" id="backBtn" aria-label="Библиотека">‹</button>
+      <div class="hud-title" id="hudTitle"></div>
+      <button class="icon" id="tocBtn" aria-label="Содержание">☰</button>
+      <button class="icon" id="setBtn" aria-label="Настройки">Aa</button>
+    </div>
+    <div class="hud-bottom">
+      <button class="icon" id="autoBtn" aria-label="Автопрокрутка">▶</button>
+      <input id="seek" class="seek" type="range" min="0" max="1000" value="0">
+      <div class="hud-pos" id="hudPos"></div>
+    </div>
+  </div>
+
+  <div id="statusline" class="statusline"><span id="stChapter"></span><span id="stPage"></span></div>
+
+  <div id="autoBar" class="auto-bar">
+    <button class="icon" id="autoStop">■</button>
+    <span class="auto-label">Скорость</span>
+    <input id="autoSpeed" class="seek" type="range" min="1" max="40" step="1" value="12">
+    <span id="autoVal" class="auto-val"></span>
+  </div>
+</section>
+
+<!-- ============ ПАНЕЛЬ НАСТРОЕК ============ -->
+<div id="sheetWrap" class="sheet-wrap">
+  <div class="sheet" id="sheet">
+    <div class="sheet-grip"></div>
+
+    <div class="sheet-tabs">
+      <button class="tab active" data-tab="look">Вид</button>
+      <button class="tab" data-tab="text">Текст</button>
+      <button class="tab" data-tab="flip">Листание</button>
+    </div>
+
+    <div class="tabpane active" data-pane="look">
+      <div class="row-title">Цветовой режим</div>
+      <div class="themes" id="themes"></div>
+      <div class="row">
+        <span>Яркость страницы</span>
+        <input id="dim" type="range" min="40" max="100" step="1" value="100">
+      </div>
+    </div>
+
+    <div class="tabpane" data-pane="text">
+      <div class="row-title">Шрифт</div>
+      <div class="fonts" id="fonts"></div>
+      <div class="row"><span>Размер</span><input id="fsize" type="range" min="14" max="34" step="1"></div>
+      <div class="row"><span>Интерлиньяж</span><input id="lheight" type="range" min="120" max="210" step="5"></div>
+      <div class="row"><span>Поля</span><input id="margin" type="range" min="8" max="46" step="2"></div>
+      <div class="row inline">
+        <label class="sw"><input type="checkbox" id="justify"><span>По ширине</span></label>
+        <label class="sw"><input type="checkbox" id="hyphens"><span>Переносы</span></label>
+        <label class="sw"><input type="checkbox" id="indent"><span>Абзацный отступ</span></label>
+      </div>
+    </div>
+
+    <div class="tabpane" data-pane="flip">
+      <div class="row-title">Анимация перехода</div>
+      <div class="segs" id="flipModes"></div>
+      <div class="row"><span>Скорость анимации</span><input id="flipSpeed" type="range" min="150" max="700" step="25"></div>
+      <div class="row-title">Автопрокрутка</div>
+      <div class="row"><span>Скорость, строк/мин</span><input id="autoSpeed2" type="range" min="1" max="40" step="1"></div>
+      <p class="note">Автопрокрутка работает в режиме «Свиток»: текст ползёт построчно. Запуск — кнопкой ▶ в нижней панели.</p>
+    </div>
+
+    <button class="btn wide" id="sheetClose">Готово</button>
+  </div>
+</div>
+
+<!-- ============ СОДЕРЖАНИЕ ============ -->
+<div id="tocWrap" class="sheet-wrap">
+  <div class="sheet tall">
+    <div class="sheet-grip"></div>
+    <div class="row-title">Содержание</div>
+    <div id="tocList" class="toc"></div>
+    <button class="btn wide" id="tocClose">Закрыть</button>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="loader" class="loader"><div class="spin"></div><div id="loaderTxt">Открываю…</div></div>
+
+<script src="vendor/jszip.min.js"></script>
+<script src="parsers.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
