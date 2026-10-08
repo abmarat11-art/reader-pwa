@@ -7,11 +7,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Читалка">
 <meta name="theme-color" content="#f6f1e7">
-<link rel="manifest" href="manifest.webmanifest?v=4">
+<link rel="manifest" href="manifest.webmanifest?v=5">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
 <title>Читалка</title>
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body data-theme="light" data-screen="library">
 
@@ -42,6 +42,7 @@
     <div class="page" data-rel="0"><div class="paper"><div class="flow"></div></div></div>
     <div class="page" data-rel="1"><div class="paper"><div class="flow"></div></div></div>
     <div id="scrollView" class="scroll-view"><div class="paper"><div class="flow"></div></div></div>
+    <div id="dimmer" class="dimmer"></div>
     <div id="tapLeft" class="tapzone left"></div>
     <div id="tapRight" class="tapzone right"></div>
     <div id="tapMid" class="tapzone mid"></div>
@@ -66,7 +67,7 @@
   <div id="autoBar" class="auto-bar">
     <button class="icon" id="autoStop">■</button>
     <span class="auto-label">Скорость</span>
-    <input id="autoSpeed" class="seek" type="range" min="1" max="40" step="1" value="12">
+    <input id="autoSpeed" class="seek" type="range" min="0" max="100" step="1" value="25">
     <span id="autoVal" class="auto-val"></span>
   </div>
 </section>
@@ -109,7 +110,7 @@
       <div class="segs" id="flipModes"></div>
       <div class="row"><span>Скорость анимации</span><input id="flipSpeed" type="range" min="200" max="900" step="25"></div>
       <div class="row-title">Автопрокрутка</div>
-      <div class="row"><span>Скорость, строк/мин</span><input id="autoSpeed2" type="range" min="1" max="40" step="1"></div>
+      <div class="row"><span>Скорость прокрутки, %</span><input id="autoSpeed2" type="range" min="0" max="100" step="1"></div>
       <p class="note">Автопрокрутка работает в режиме «Свиток»: текст ползёт построчно. Запуск — кнопкой ▶ в нижней панели.</p>
     </div>
 
@@ -130,8 +131,8 @@
 <div id="toast" class="toast"></div>
 <div id="loader" class="loader"><div class="spin"></div><div id="loaderTxt">Открываю…</div></div>
 
-<script src="vendor/jszip.min.js?v=4"></script>
-<script src="parsers.js?v=4"></script>
-<script src="app.js?v=4"></script>
+<script src="vendor/jszip.min.js?v=5"></script>
+<script src="parsers.js?v=5"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

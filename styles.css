@@ -86,11 +86,16 @@ body[data-screen="reader"] #reader{display:block}
   background:linear-gradient(to right,rgba(0,0,0,.42),rgba(0,0,0,.12) 24%,rgba(0,0,0,0) 52%);
   opacity:var(--ushade,0);
 }
-.paper{position:absolute;inset:0;padding:var(--pad-v) var(--pad-h) var(--pad-b);filter:brightness(var(--dimv,1))}
+.paper{position:absolute;inset:0;padding:var(--pad-v) var(--pad-h) var(--pad-b)}
 .flow{height:100%;column-fill:auto;overflow:hidden;transform:translateZ(0)}
 
 /* режим свитка */
-.scroll-view{position:absolute;inset:0;display:none;overflow-y:auto;-webkit-overflow-scrolling:touch;filter:brightness(var(--dimv,1))}
+.scroll-view{position:absolute;inset:0;display:none;overflow-y:auto;-webkit-overflow-scrolling:touch}
+/* Яркость вешаем только когда её реально убавили: любой filter на родителе
+   запрещает браузеру двигать текст на композиторе — текст перерисовывается
+   каждый кадр и мажется при прокрутке. */
+.dimmer{position:absolute;inset:0;z-index:4;pointer-events:none;background:#000;
+  opacity:calc(1 - var(--dimv,1))}
 body[data-flip="scroll"] .scroll-view{display:block}
 body[data-flip="scroll"] .viewport{touch-action:auto}
 body[data-flip="scroll"] .page{display:none}

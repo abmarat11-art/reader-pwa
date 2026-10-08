@@ -36,9 +36,13 @@ const FLIPS = [
 ];
 
 const DEF = { theme:'soft', font:'ny', fsize:20, lheight:160, margin:24, justify:true,
-  hyphens:true, indent:true, flip:'curl', flipSpeed:520, autoSpeed:12, dim:100 };
+  hyphens:true, indent:true, flip:'curl', flipSpeed:520, autoPct:25, dim:100 };
 
 let S = Object.assign({}, DEF, JSON.parse(localStorage.getItem('reader.settings') || '{}'));
+delete S.autoSpeed;                       // старая шкала строк/мин больше не используется
+/* 0 % — 40 строк/мин (прежний потолок), 100 % — вчетверо быстрее */
+const AUTO_BASE = 40;
+const autoLines = () => AUTO_BASE * (1 + 3 * clamp(S.autoPct, 0, 100) / 100);
 const saveSettings = () => localStorage.setItem('reader.settings', JSON.stringify(S));
 
 /* ====================== хранилище ====================== */
@@ -116,12 +120,16 @@ $('#filePick').onchange = async e => {
     loader(true, 'Разбираю «' + f.name + '»…');
     try {
       const book = await Parsers.parseBook(f);
-      book.id = 'b' + Date.now() + Math.random().toString(36).slice(2, 7);
-      book.addedAt = Date.now();
+      // одна и та же книга, добавленная заново, должна лечь поверх старой,
+      // иначе закладка остаётся у прежней записи, а читаешь ты новую
+      book.key = [book.title, book.author, f.size].join('|');
+      const twin = (await DB.all('books')).find(b => b.key === book.key);
+      book.id = twin ? twin.id : 'b' + Date.now() + Math.random().toString(36).slice(2, 7);
+      book.addedAt = twin ? twin.addedAt : Date.now();
       // blob-URL обложки в хранилище не живёт — только data:
       if (book.cover && !/^data:/.test(book.cover)) book.cover = null;
       await DB.put('books', book);
-      toast('Добавлено: ' + book.title);
+      toast((twin ? 'Обновил: ' : 'Добавлено: ') + book.title);
     } catch (err) {
       console.error(err);
       toast('Не вышло открыть ' + f.name + ': ' + err.message, 3600);
@@ -263,7 +271,7 @@ function globalProgress() {
   const n = book.chapters.length;
   if (S.flip === 'scroll') {
     const max = sv.scrollHeight - sv.clientHeight;
-    const f = max > 0 ? sv.scrollTop / max : 0;
+    const f = max > 0 ? svOffset() / max : 0;
     return clamp((ci + f) / n, 0, 1);
   }
   const np = pagesOf(ci);
@@ -281,12 +289,16 @@ function updateStatus() {
 }
 
 let saveT;
-function saveProgress() {
+function stateNow() {
+  return { id:book.id, ci, pi, progress:globalProgress(),
+    scroll: S.flip === 'scroll' ? svOffset() : 0, at: Date.now() };
+}
+function saveProgress(now) {
+  const st = stateNow();
+  localStorage.setItem('reader.last', JSON.stringify(st));   // запись мгновенная
   clearTimeout(saveT);
-  saveT = setTimeout(() => {
-    DB.put('state', { id:book.id, ci, pi, progress:globalProgress(),
-      scroll: S.flip === 'scroll' ? sv.scrollTop : 0 });
-  }, 400);
+  if (now) { DB.put('state', st); return; }
+  saveT = setTimeout(() => DB.put('state', st), 400);
 }
 
 /* ====================== переход страниц ====================== */
@@ -535,7 +547,27 @@ sv.addEventListener('scroll', () => {
 }, { passive:true });
 let svLock = false, lastScrollTop = 0, lastScrollDir = 0;
 
-let autoOn = false, autoRaf = 0, autoLast = 0, autoAcc = 0;
+let autoOn = false, autoRaf = 0, autoLast = 0, autoY = 0;
+
+/* положение в свитке: во время автопрокрутки текст сдвинут трансформом,
+   сам контейнер при этом стоит на нуле */
+const svOffset = () => autoOn ? autoY : sv.scrollTop;
+const svMax = () => Math.max(0, sv.scrollHeight - sv.clientHeight);
+
+/* Сдвиг трансформом, а не scrollTop: слой едет на композиторе, текст не
+   перерисовывается каждый кадр и не оставляет за собой шлейф. Округляем до
+   физического пикселя, иначе глифы мылятся. */
+function autoApply() {
+  const inner = innerOf(sv);
+  const dpr = window.devicePixelRatio || 1;
+  inner.style.transform = 'translate3d(0,' + (-Math.round(autoY * dpr) / dpr) + 'px,0)';
+}
+function autoDetach() {
+  const inner = innerOf(sv);
+  inner.style.transform = '';
+  inner.style.willChange = '';
+  sv.style.overflowY = '';
+}
 function autoStart() {
   if (!book) return;
   if (S.flip !== 'scroll') {
@@ -543,7 +575,12 @@ function autoStart() {
     sv.dataset.ch = ''; renderScroll();
     toast('Включил «Свиток» — автопрокрутка работает в нём');
   }
-  autoOn = true; autoLast = 0; autoAcc = 0;
+  autoY = sv.scrollTop;
+  autoOn = true; autoLast = 0;
+  sv.scrollTop = 0;
+  sv.style.overflowY = 'hidden';          // чтобы палец и автопрокрутка не спорили
+  innerOf(sv).style.willChange = 'transform';
+  autoApply();
   $('#autoBar').classList.add('show');
   $('#autoBtn').textContent = '❚❚';
   hud(false);
@@ -551,16 +588,19 @@ function autoStart() {
     if (!autoOn) return;
     if (autoLast) {
       const lh = S.fsize * (S.lheight / 100);
-      autoAcc += lh * S.autoSpeed / 60000 * (ts - autoLast);
-      if (autoAcc >= 1) {
-        const px = Math.floor(autoAcc); autoAcc -= px;
-        const before = sv.scrollTop;
-        sv.scrollTop = before + px;
-        if (sv.scrollTop === before) { // конец главы
-          if (ci + 1 < book.chapters.length) { ci++; sv.dataset.ch = ''; renderScroll(); }
-          else { autoStop(); toast('Книга дочитана'); return; }
+      autoY += lh * autoLines() / 60000 * Math.min(100, ts - autoLast);
+      const max = svMax();
+      if (autoY >= max) {
+        if (ci + 1 < book.chapters.length) {
+          ci++; sv.dataset.ch = ''; renderScroll();
+          autoY = 0; sv.scrollTop = 0;
+          innerOf(sv).style.willChange = 'transform';
+        } else {
+          autoY = max; autoApply(); autoStop(); toast('Книга дочитана'); return;
         }
       }
+      autoApply();
+      updateStatus(); saveProgress();
     }
     autoLast = ts;
     autoRaf = requestAnimationFrame(tick);
@@ -568,15 +608,25 @@ function autoStart() {
   autoRaf = requestAnimationFrame(tick);
 }
 function autoStop() {
+  if (!autoOn) { $('#autoBar').classList.remove('show'); $('#autoBtn').textContent = '▶'; return; }
+  const y = autoY;
   autoOn = false; cancelAnimationFrame(autoRaf);
+  autoDetach();
+  sv.scrollTop = y;
   $('#autoBar').classList.remove('show');
   $('#autoBtn').textContent = '▶';
+  saveProgress();
 }
 $('#autoBtn').onclick = () => autoOn ? autoStop() : autoStart();
 $('#autoStop').onclick = autoStop;
-const speedLabel = () => $('#autoVal').textContent = S.autoSpeed + ' стр/мин';
-$('#autoSpeed').oninput = e => { S.autoSpeed = +e.target.value; $('#autoSpeed2').value = S.autoSpeed; speedLabel(); saveSettings(); };
-$('#autoSpeed2').oninput = e => { S.autoSpeed = +e.target.value; $('#autoSpeed').value = S.autoSpeed; speedLabel(); saveSettings(); };
+const speedLabel = () => $('#autoVal').textContent = S.autoPct + '%';
+const setSpeed = v => {
+  S.autoPct = clamp(+v, 0, 100);
+  $('#autoSpeed').value = S.autoPct; $('#autoSpeed2').value = S.autoPct;
+  speedLabel(); saveSettings();
+};
+$('#autoSpeed').oninput = e => setSpeed(e.target.value);
+$('#autoSpeed2').oninput = e => setSpeed(e.target.value);
 
 /* ====================== HUD, листы ====================== */
 let hudT;
@@ -587,7 +637,13 @@ function hud(on) {
 }
 const toggleHud = () => hud(!$('#hud').classList.contains('show'));
 
-$('#backBtn').onclick = () => { autoStop(); document.body.dataset.screen = 'library'; renderShelf(); };
+$('#backBtn').onclick = () => {
+  autoStop();
+  if (book) saveProgress(true);
+  localStorage.setItem('reader.openLast', '0');   // ушёл в библиотеку — с неё и начнём
+  document.body.dataset.screen = 'library';
+  renderShelf();
+};
 $('#setBtn').onclick = () => { $('#sheetWrap').classList.add('show'); hud(false); };
 $('#sheetClose').onclick = () => $('#sheetWrap').classList.remove('show');
 $('#sheetWrap').onclick = e => { if (e.target.id === 'sheetWrap') $('#sheetWrap').classList.remove('show'); };
@@ -672,7 +728,7 @@ function syncSheet() {
   $('#fsize').value = S.fsize; $('#lheight').value = S.lheight; $('#margin').value = S.margin;
   $('#justify').checked = S.justify; $('#hyphens').checked = S.hyphens; $('#indent').checked = S.indent;
   $('#flipSpeed').value = S.flipSpeed; $('#dim').value = S.dim;
-  $('#autoSpeed').value = S.autoSpeed; $('#autoSpeed2').value = S.autoSpeed;
+  $('#autoSpeed').value = S.autoPct; $('#autoSpeed2').value = S.autoPct;
   speedLabel();
 }
 let relayoutT;
@@ -711,9 +767,14 @@ async function openBook(id) {
   loader(true, 'Открываю…');
   book = await DB.get('books', id);
   if (!book) { loader(false); return toast('Книга не найдена'); }
-  const st = await DB.get('state', id) || { ci:0, pi:0 };
+  let st = await DB.get('state', id) || { ci:0, pi:0 };
+  try {                                   // localStorage мог успеть записать позже
+    const q = JSON.parse(localStorage.getItem('reader.last') || 'null');
+    if (q && q.id === id && (q.at || 0) > (st.at || 0)) st = q;
+  } catch (e) { /* неважно */ }
   ci = clamp(st.ci || 0, 0, book.chapters.length - 1); pi = st.pi || 0;
   document.body.dataset.screen = 'reader';
+  localStorage.setItem('reader.openLast', '1');
   applyStyleVars();
   metricsKey = ''; pages = {};
   [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.ch = '');
@@ -738,10 +799,29 @@ window.addEventListener('keydown', e => {
   if (e.key === 'Escape') $('#backBtn').click();
 });
 
+/* iOS выкидывает хранилище «неважных» сайтов — просим пометить наше как нужное */
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persisted().then(ok => ok || navigator.storage.persist()).catch(() => {});
+}
+
+/* сохраняем позицию сразу, как только приложение уходит из виду:
+   iOS закрывает вкладку без предупреждения, отложенная запись пропадёт */
+const flush = () => { if (book) saveProgress(true); };
+window.addEventListener('pagehide', flush);
+window.addEventListener('beforeunload', flush);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
+
 applyStyleVars();
 buildSheet();
 syncSheet();
-renderShelf();
+renderShelf().then(async () => {
+  // открываем последнюю книгу там же, где закрыли
+  try {
+    const q = JSON.parse(localStorage.getItem('reader.last') || 'null');
+    if (localStorage.getItem('reader.openLast') !== '0' &&
+        q && q.id && await DB.get('books', q.id)) openBook(q.id);
+  } catch (e) { /* остаёмся в библиотеке */ }
+});
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
