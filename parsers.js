@@ -25,11 +25,43 @@
      ============================================================ */
   async function parseEpub(buffer) {
     const zip = await JSZip.loadAsync(buffer);
-    const xml = async p => new DOMParser().parseFromString(await zip.file(p).async('string'), 'application/xml');
+
+    // имена внутри архива и ссылки в OPF расходятся чаще, чем хотелось бы:
+    // регистр, «./», обратные слэши, %-кодировка. Ищем с допусками.
+    const names = Object.keys(zip.files).filter(n => !zip.files[n].dir);
+    const byLower = {}; const byBase = {};
+    names.forEach(n => {
+      byLower[n.toLowerCase()] = n;
+      const b = n.slice(n.lastIndexOf('/') + 1).toLowerCase();
+      if (!(b in byBase)) byBase[b] = n;
+    });
+    const pick = p => {
+      if (!p) return null;
+      const clean = p.replace(/\\/g, '/').replace(/^\.\//, '');
+      let f = zip.file(clean) || zip.file(decodeURIComponent(clean));
+      if (f) return f;
+      const low = byLower[clean.toLowerCase()] || byLower[decodeURIComponent(clean).toLowerCase()];
+      if (low) return zip.file(low);
+      const base = clean.slice(clean.lastIndexOf('/') + 1).toLowerCase();
+      const hit = byBase[base] || byBase[decodeURIComponent(base)];
+      return hit ? zip.file(hit) : null;
+    };
+    const read = async p => { const f = pick(p); return f ? f.async('string') : null; };
+    const xml = async p => {
+      const t = await read(p);
+      if (t == null) throw new Error('в архиве нет файла ' + p);
+      return new DOMParser().parseFromString(t, 'application/xml');
+    };
 
     // 1. корневой OPF
-    const container = await xml('META-INF/container.xml');
-    const opfPath = container.querySelector('rootfile').getAttribute('full-path');
+    let opfPath = '';
+    try {
+      const container = await xml('META-INF/container.xml');
+      const rf = container.querySelector('rootfile');
+      opfPath = rf ? rf.getAttribute('full-path') : '';
+    } catch (e) { /* ниже поищем .opf сами */ }
+    if (!opfPath || !pick(opfPath)) opfPath = names.find(n => /\.opf$/i.test(n)) || '';
+    if (!opfPath) throw new Error('это не похоже на EPUB: нет файла .opf');
     const base = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
     const opf = await xml(opfPath);
 
@@ -55,7 +87,7 @@
     await Promise.all(Object.values(manifest)
       .filter(m => /^image\//.test(m.type))
       .map(async m => {
-        const f = zip.file(m.href);
+        const f = pick(m.href);
         if (!f) return;
         resMap[m.href] = URL.createObjectURL(new Blob([await f.async('arraybuffer')], { type: m.type }));
       }));
@@ -72,8 +104,8 @@
     const tocTitles = {};
     try {
       const navItem = Object.values(manifest).find(m => /\bnav\b/.test(m.props));
-      if (navItem && zip.file(navItem.href)) {
-        const doc = new DOMParser().parseFromString(await zip.file(navItem.href).async('string'), 'text/html');
+      if (navItem && pick(navItem.href)) {
+        const doc = new DOMParser().parseFromString(await read(navItem.href), 'text/html');
         const navBase = navItem.href.includes('/') ? navItem.href.slice(0, navItem.href.lastIndexOf('/') + 1) : '';
         doc.querySelectorAll('nav a[href]').forEach(a => {
           const h = resolve(navBase, a.getAttribute('href').split('#')[0]);
@@ -81,7 +113,7 @@
         });
       } else {
         const ncx = Object.values(manifest).find(m => /ncx/.test(m.type));
-        if (ncx && zip.file(ncx.href)) {
+        if (ncx && pick(ncx.href)) {
           const doc = await xml(ncx.href);
           const nb = ncx.href.includes('/') ? ncx.href.slice(0, ncx.href.lastIndexOf('/') + 1) : '';
           [...doc.getElementsByTagName('navPoint')].forEach(np => {
@@ -95,14 +127,22 @@
       }
     } catch (e) { /* содержание не критично */ }
 
-    // 6. spine → главы
-    const spine = [...opf.getElementsByTagName('itemref')]
+    // 6. spine → главы. Если spine пуст или ни один файл не нашёлся,
+    //    идём по всем (x)html архива по порядку имён — лучше так, чем пустая книга.
+    let spine = [...opf.getElementsByTagName('itemref')]
       .map(r => manifest[r.getAttribute('idref')])
-      .filter(m => m && /html|xml/.test(m.type));
+      .filter(m => m && pick(m.href) && !/^image\/|css|ncx/.test(m.type));
+    if (!spine.length) {
+      spine = Object.values(manifest).filter(m => /html/i.test(m.type) && pick(m.href));
+    }
+    if (!spine.length) {
+      spine = names.filter(n => /\.x?html?$/i.test(n) && !/^META-INF\//i.test(n))
+        .sort().map(href => ({ href, type:'application/xhtml+xml', props:'' }));
+    }
 
     const chapters = [];
     for (const item of spine) {
-      const f = zip.file(item.href);
+      const f = pick(item.href);
       if (!f) continue;
       const raw = await f.async('string');
       const doc = new DOMParser().parseFromString(raw, 'text/html');
@@ -136,7 +176,10 @@
       });
     }
 
-    if (!chapters.length) throw new Error('В EPUB не нашлось текста');
+    if (!chapters.length) {
+      throw new Error('в EPUB не нашлось текста (файлов в архиве: ' + names.length +
+        ', в оглавлении книги: ' + spine.length + ')');
+    }
     return { title, author, cover, chapters, format: 'epub' };
   }
 
