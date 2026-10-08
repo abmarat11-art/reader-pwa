@@ -20,6 +20,25 @@
     return root;
   }
 
+  /* XHTML нельзя разбирать HTML-парсером: в этой книге <title/> написан
+     самозакрывающимся, а для HTML это открывающий тег — всё остальное уезжает
+     внутрь заголовка, и глава выходит пустой. Пробуем XML, падаем на HTML. */
+  function docFrom(raw, type) {
+    let d = null;
+    if (/xml/i.test(type || '') || /^\s*<\?xml/.test(raw)) {
+      try {
+        const x = new DOMParser().parseFromString(raw, 'application/xhtml+xml');
+        if (!x.getElementsByTagName('parsererror').length && x.body) d = x;
+      } catch (e) { /* ниже разберём как HTML */ }
+    }
+    if (!d) d = new DOMParser().parseFromString(raw, 'text/html');
+    if (!d.body || !d.body.textContent.trim()) {
+      const h = new DOMParser().parseFromString(raw, 'text/html');
+      if (h.body && h.body.textContent.trim()) d = h;
+    }
+    return d;
+  }
+
   /* ============================================================
      EPUB
      ============================================================ */
@@ -82,14 +101,16 @@
       };
     });
 
-    // 3. ресурсы (картинки) → blob URL
+    // 3. ресурсы (картинки) → data: URL.
+    //    blob-URL умирает вместе с вкладкой, а книга лежит в хранилище долго:
+    //    после перезапуска обложка и иллюстрации стали бы битыми ссылками.
     const resMap = {};
     await Promise.all(Object.values(manifest)
       .filter(m => /^image\//.test(m.type))
       .map(async m => {
         const f = pick(m.href);
         if (!f) return;
-        resMap[m.href] = URL.createObjectURL(new Blob([await f.async('arraybuffer')], { type: m.type }));
+        resMap[m.href] = 'data:' + m.type + ';base64,' + await f.async('base64');
       }));
 
     // 4. обложка
@@ -105,7 +126,7 @@
     try {
       const navItem = Object.values(manifest).find(m => /\bnav\b/.test(m.props));
       if (navItem && pick(navItem.href)) {
-        const doc = new DOMParser().parseFromString(await read(navItem.href), 'text/html');
+        const doc = docFrom(await read(navItem.href), navItem.type);
         const navBase = navItem.href.includes('/') ? navItem.href.slice(0, navItem.href.lastIndexOf('/') + 1) : '';
         doc.querySelectorAll('nav a[href]').forEach(a => {
           const h = resolve(navBase, a.getAttribute('href').split('#')[0]);
@@ -145,7 +166,7 @@
       const f = pick(item.href);
       if (!f) continue;
       const raw = await f.async('string');
-      const doc = new DOMParser().parseFromString(raw, 'text/html');
+      const doc = docFrom(raw, item.type);
       const body = doc.body;
       if (!body) continue;
       sanitize(body);
@@ -159,7 +180,8 @@
         if (url) img.setAttribute(attr === 'src' ? 'src' : 'src', url);
         else img.remove();
         if (img.tagName.toLowerCase() === 'image') {
-          const n = doc.createElement('img'); n.src = url; img.replaceWith(n);
+          const n = doc.createElementNS('http://www.w3.org/1999/xhtml', 'img');
+          n.setAttribute('src', url); img.replaceWith(n);
         }
       });
       body.querySelectorAll('a[href]').forEach(a => { a.removeAttribute('href'); });
@@ -169,9 +191,12 @@
       if (!html || !body.textContent.trim()) continue;
 
       const head = body.querySelector('h1,h2,h3,h4');
+      const txt = body.textContent.trim().length;
+      const auto = txt < 400 && /<img/i.test(html) ? 'Обложка'
+                 : txt < 400 ? 'Титул'
+                 : 'Часть ' + (chapters.length + 1);
       chapters.push({
-        title: tocTitles[item.href] || (head ? head.textContent.trim().slice(0, 80) : '') ||
-               ('Часть ' + (chapters.length + 1)),
+        title: tocTitles[item.href] || (head ? head.textContent.trim().slice(0, 80) : '') || auto,
         html
       });
     }
