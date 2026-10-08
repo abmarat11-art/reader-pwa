@@ -7,11 +7,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Читалка">
 <meta name="theme-color" content="#f6f1e7">
-<link rel="manifest" href="manifest.webmanifest?v=5">
+<link rel="manifest" href="manifest.webmanifest?v=6">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
 <title>Читалка</title>
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body data-theme="light" data-screen="library">
 
@@ -49,14 +49,10 @@
   </div>
 
   <div id="hud" class="hud">
-    <div class="hud-top">
-      <button class="icon" id="backBtn" aria-label="Библиотека">‹</button>
-      <div class="hud-title" id="hudTitle"></div>
-      <button class="icon" id="tocBtn" aria-label="Содержание">☰</button>
-      <button class="icon" id="setBtn" aria-label="Настройки">Aa</button>
-    </div>
+    <button class="fab tl" id="fullBtn" aria-label="Во весь экран">⛶</button>
+    <button class="fab tr" id="setBtn" aria-label="Меню">☰</button>
+    <button class="fab br" id="autoBtn" aria-label="Автопрокрутка">▶</button>
     <div class="hud-bottom">
-      <button class="icon" id="autoBtn" aria-label="Автопрокрутка">▶</button>
       <input id="seek" class="seek" type="range" min="0" max="1000" value="0">
       <div class="hud-pos" id="hudPos"></div>
     </div>
@@ -76,6 +72,12 @@
 <div id="sheetWrap" class="sheet-wrap">
   <div class="sheet" id="sheet">
     <div class="sheet-grip"></div>
+
+    <div class="sheet-head">
+      <button class="chip" id="backBtn">‹ Библиотека</button>
+      <button class="chip" id="tocBtn">Оглавление</button>
+    </div>
+    <div class="sheet-book" id="hudTitle"></div>
 
     <div class="sheet-tabs">
       <button class="tab active" data-tab="look">Вид</button>
@@ -131,8 +133,8 @@
 <div id="toast" class="toast"></div>
 <div id="loader" class="loader"><div class="spin"></div><div id="loaderTxt">Открываю…</div></div>
 
-<script src="vendor/jszip.min.js?v=5"></script>
-<script src="parsers.js?v=5"></script>
-<script src="app.js?v=5"></script>
+<script src="vendor/jszip.min.js?v=6"></script>
+<script src="parsers.js?v=6"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

@@ -582,8 +582,8 @@ function autoStart() {
   innerOf(sv).style.willChange = 'transform';
   autoApply();
   $('#autoBar').classList.add('show');
+  document.body.classList.add('auto');
   $('#autoBtn').textContent = '❚❚';
-  hud(false);
   const tick = ts => {
     if (!autoOn) return;
     if (autoLast) {
@@ -608,12 +608,17 @@ function autoStart() {
   autoRaf = requestAnimationFrame(tick);
 }
 function autoStop() {
-  if (!autoOn) { $('#autoBar').classList.remove('show'); $('#autoBtn').textContent = '▶'; return; }
+  if (!autoOn) {
+    $('#autoBar').classList.remove('show');
+    document.body.classList.remove('auto');
+    $('#autoBtn').textContent = '▶'; return;
+  }
   const y = autoY;
   autoOn = false; cancelAnimationFrame(autoRaf);
   autoDetach();
   sv.scrollTop = y;
   $('#autoBar').classList.remove('show');
+  document.body.classList.remove('auto');
   $('#autoBtn').textContent = '▶';
   saveProgress();
 }
@@ -629,27 +634,59 @@ $('#autoSpeed').oninput = e => setSpeed(e.target.value);
 $('#autoSpeed2').oninput = e => setSpeed(e.target.value);
 
 /* ====================== HUD, листы ====================== */
-let hudT;
 function hud(on) {
   $('#hud').classList.toggle('show', !!on);
-  clearTimeout(hudT);
-  if (on) hudT = setTimeout(() => $('#hud').classList.remove('show'), 4200);
+  // полоса скорости живёт отдельно от HUD — прячем её тем же тапом
+  document.body.classList.toggle('ui-off', !on);
 }
 const toggleHud = () => hud(!$('#hud').classList.contains('show'));
 
+/* ====================== во весь экран ======================
+   На айфоне Safari не умеет раскрывать произвольный элемент (Fullscreen API
+   есть только у видео), зато из «на экран «Домой»» приложение и так стартует
+   без адресной строки. Поэтому: где API есть — зовём его, где нет — честно
+   говорим, что делать. */
+const standalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches)
+  || navigator.standalone === true;
+const fullNow = () => document.fullscreenElement || document.webkitFullscreenElement;
+function syncFullBtn() {
+  const b = $('#fullBtn');
+  if (standalone()) { b.style.display = 'none'; return; }
+  b.textContent = fullNow() ? '⤡' : '⛶';
+}
+$('#fullBtn').onclick = async () => {
+  const el = document.documentElement;
+  try {
+    if (fullNow()) {
+      await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (!req) return toast('Safari на айфоне не раскрывает страницу на весь экран. ' +
+        'Добавь читалку на домашний экран — запустится без адресной строки.', 4200);
+      await req.call(el);
+    }
+  } catch (e) { toast('Не вышло развернуть: ' + e.message, 2600); }
+  syncFullBtn();
+};
+document.addEventListener('fullscreenchange', syncFullBtn);
+document.addEventListener('webkitfullscreenchange', syncFullBtn);
+syncFullBtn();
+
 $('#backBtn').onclick = () => {
+  $('#sheetWrap').classList.remove('show');
   autoStop();
   if (book) saveProgress(true);
   localStorage.setItem('reader.openLast', '0');   // ушёл в библиотеку — с неё и начнём
   document.body.dataset.screen = 'library';
   renderShelf();
 };
-$('#setBtn').onclick = () => { $('#sheetWrap').classList.add('show'); hud(false); };
+$('#setBtn').onclick = () => $('#sheetWrap').classList.add('show');
 $('#sheetClose').onclick = () => $('#sheetWrap').classList.remove('show');
 $('#sheetWrap').onclick = e => { if (e.target.id === 'sheetWrap') $('#sheetWrap').classList.remove('show'); };
 $('#tocClose').onclick = () => $('#tocWrap').classList.remove('show');
 $('#tocWrap').onclick = e => { if (e.target.id === 'tocWrap') $('#tocWrap').classList.remove('show'); };
 $('#tocBtn').onclick = () => {
+  $('#sheetWrap').classList.remove('show');     // оглавление открывается поверх меню
   const list = $('#tocList'); list.innerHTML = '';
   book.chapters.forEach((c, i) => {
     const a = document.createElement('a');
@@ -660,12 +697,11 @@ $('#tocBtn').onclick = () => {
     a.appendChild(sp);
     a.onclick = () => {
       $('#tocWrap').classList.remove('show');
-      ci = i; pi = 0; sv.dataset.ch = ''; render(); hud(false);
+      ci = i; pi = 0; sv.dataset.ch = ''; render();
     };
     list.appendChild(a);
   });
   $('#tocWrap').classList.add('show');
-  hud(false);
 };
 $$('.sheet-tabs .tab').forEach(t => t.onclick = () => {
   $$('.sheet-tabs .tab').forEach(x => x.classList.toggle('active', x === t));
