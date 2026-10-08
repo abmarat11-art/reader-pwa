@@ -1,7 +1,8 @@
 /* Офлайн-кеш читалки. Отдаём из кеша сразу, следом тихо обновляем:
    свежая версия подхватится при следующем запуске, офлайн не ломается. */
-const CACHE = 'reader-v2';
-const ASSETS = ['./','./index.html','./styles.css','./app.js','./parsers.js','./vendor/jszip.min.js','./manifest.webmanifest'];
+const CACHE = 'reader-v3';
+const V = '3';
+const ASSETS = ['./','./index.html','./styles.css?v='+V,'./app.js?v='+V,'./parsers.js?v='+V,'./vendor/jszip.min.js?v='+V,'./manifest.webmanifest?v='+V];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));

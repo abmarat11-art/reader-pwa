@@ -19,9 +19,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*a, directory=ROOT, **kw)
 
     def end_headers(self):
-        # service worker и страница не должны залипать в кеше браузера
-        if self.path.rstrip('/') in ('', '/index.html') or self.path.endswith('sw.js'):
-            self.send_header('Cache-Control', 'no-cache')
+        # Cloudflare по умолчанию держит .js и .css четыре часа — правки не доезжают.
+        # Файлы отдаёт домашний мак, трафик копеечный: проще не кешировать вовсе.
+        self.send_header('Cache-Control', 'no-cache, must-revalidate')
         self.end_headers_orig()
 
     end_headers_orig = http.server.SimpleHTTPRequestHandler.end_headers
