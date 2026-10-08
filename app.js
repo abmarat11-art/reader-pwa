@@ -36,7 +36,7 @@ const FLIPS = [
 ];
 
 const DEF = { theme:'soft', font:'ny', fsize:20, lheight:160, margin:24, justify:true,
-  hyphens:true, indent:true, flip:'curl', flipSpeed:420, autoSpeed:12, dim:100 };
+  hyphens:true, indent:true, flip:'curl', flipSpeed:520, autoSpeed:12, dim:100 };
 
 let S = Object.assign({}, DEF, JSON.parse(localStorage.getItem('reader.settings') || '{}'));
 const saveSettings = () => localStorage.setItem('reader.settings', JSON.stringify(S));
@@ -139,7 +139,7 @@ let pages = {};               // ci → число страниц при тек�
 let metricsKey = '';
 const layers = { prev: $('.page[data-rel="-1"]'), cur: $('.page[data-rel="0"]'), next: $('.page[data-rel="1"]') };
 const sv = $('#scrollView');
-let W = 0, H = 0, G = 0;
+let W = 0, H = 0, G = 0, PW = 0;
 
 function applyStyleVars() {
   const r = document.documentElement.style;
@@ -163,6 +163,7 @@ function applyStyleVars() {
 
 function measureBox() {
   const vp = $('#viewport');
+  PW = vp.clientWidth;
   W = vp.clientWidth - S.margin * 2;
   H = vp.clientHeight - Math.max(14, S.margin * 0.8) * 2 - 20;
   G = Math.max(16, S.margin);
@@ -222,7 +223,9 @@ function resetTransforms() {
     l.style.transform = 'none';
     l.style.opacity = '1';
     l.style.filter = 'none';
-    l.classList.remove('lift');
+    l.classList.remove('lift', 'under');
+    l.style.removeProperty('--ushade');
+    dropBend(l);
   });
   layers.prev.style.zIndex = 1; layers.cur.style.zIndex = 2; layers.next.style.zIndex = 0;
 }
@@ -240,6 +243,7 @@ function render() {
   resetTransforms();
   updateStatus();
   saveProgress();
+  scheduleBend();
 }
 
 function renderScroll() {
@@ -296,19 +300,123 @@ function go(dir) {
   animate(dir, 1, () => { ci = t.c; pi = t.p; render(); });
 }
 
-/* dir: 1 вперёд, -1 назад; from — текущее положение 0..1 (для докрутки свайпа) */
-function animate(dir, to, done, fromP) {
-  animating = true;
-  const dur = S.flipSpeed;
-  const moving = dir > 0 ? layers.cur : layers.prev;
-  prepareDrag(dir);
-  const p0 = fromP == null ? 0 : fromP;
-  requestAnimationFrame(() => {
-    moving.style.transition = 'transform ' + dur + 'ms cubic-bezier(.25,.8,.3,1), opacity ' + dur + 'ms linear, filter ' + dur + 'ms linear';
-    applyDrag(dir, to);
-    setTimeout(() => { animating = false; moving.style.transition = 'none'; done && done(); }, dur + 20);
+/* ====================== мягкий лист ======================
+   Страница в режиме «Страница» не поворачивается целиком как доска:
+   она разрезана на вертикальные полоски, каждая повёрнута на свой угол
+   и поставлена встык к предыдущей. Получается изогнутая поверхность —
+   у корешка лист почти плоский, к свободному краю загибается сильнее.
+   Освещение считается по углу полоски: лицо темнеет, уходя от нас,
+   изнанка светлеет, разворачиваясь к нам.                              */
+
+const STRIPS = 14;        // полосок на страницу
+const BEND   = 0.80;      // насколько сильно лист гнётся в середине хода
+const ZS     = 0.42;      // насколько лист поднимается к читателю (1 — «физически», но слишком)
+const smooth = t => t * t * (3 - 2 * t);
+
+function buildBend(layer) {
+  dropBend(layer);
+  const paper = layer.querySelector('.paper');
+  const rig = document.createElement('div');
+  rig.className = 'bend';
+  const sw = PW / STRIPS;
+  for (let i = 0; i < STRIPS; i++) {
+    const st = document.createElement('div');
+    st.className = 'strip';
+    st.style.width = (sw + 1.4) + 'px';           // нахлёст, чтобы не было щелей
+    const face = document.createElement('div');
+    face.className = 'face';
+    const sheet = document.createElement('div');
+    sheet.className = 'leaf';
+    sheet.style.width = PW + 'px';
+    sheet.style.left = (-i * sw) + 'px';
+    sheet.appendChild(paper.cloneNode(true));
+    face.appendChild(sheet);
+    const shade = document.createElement('div'); shade.className = 'shade';
+    face.appendChild(shade);
+    // изнанка: та же страница просвечивает сквозь бумагу зеркально и еле-еле
+    const back = document.createElement('div'); back.className = 'back';
+    const bleaf = document.createElement('div');
+    bleaf.className = 'leaf through';
+    bleaf.style.width = PW + 'px';
+    bleaf.style.left = (-i * sw) + 'px';
+    bleaf.appendChild(paper.cloneNode(true));
+    back.appendChild(bleaf);
+    const bshade = document.createElement('div'); bshade.className = 'shade';
+    back.appendChild(bshade);
+    st.append(face, back);
+    rig.appendChild(st);
+    st._shade = shade; st._bshade = bshade;
+  }
+  layer.appendChild(rig);
+  layer._strips = [...rig.children];
+  applyBend(layer, 0);
+}
+
+function dropBend(layer) {
+  const rig = layer.querySelector('.bend');
+  if (rig) rig.remove();
+  layer._strips = null;
+  layer.classList.remove('bending');
+}
+
+/* q: 0 — лист на месте, 1 — лист перевёрнут налево */
+function applyBend(layer, q) {
+  const strips = layer._strips;
+  if (!strips) return;
+  const n = strips.length, L = PW / n;
+  const A = Math.PI * q;
+  const soft = BEND * Math.pow(Math.sin(Math.PI * q), 1.2) * (1 - 0.3 * q);
+  let x = 0, z = 0;
+  for (let i = 0; i < n; i++) {
+    const t = (i + 1) / n;
+    const a = A * ((1 - soft) + soft * smooth(t));
+    const st = strips[i];
+    st.style.transform = 'translate3d(' + x.toFixed(2) + 'px,0,' + z.toFixed(2) + 'px) rotateY(' + (-a * 180 / Math.PI).toFixed(2) + 'deg)';
+    const c = Math.cos(a);
+    st._shade.style.opacity  = (0.34 * (1 - c) / 2).toFixed(3);
+    st._bshade.style.opacity = (0.30 * (1 + c) / 2 + 0.06).toFixed(3);
+    x += L * Math.cos(a);
+    z += L * Math.sin(a) * ZS;
+  }
+}
+
+let bendIdle = [];
+function scheduleBend() {
+  bendIdle.forEach(id => { if (window.cancelIdleCallback) window.cancelIdleCallback(id); else clearTimeout(id); });
+  bendIdle = [];
+  if (S.flip !== 'curl' || !book) return;
+  const idle = window.requestIdleCallback || (f => setTimeout(f, 80));
+  [layers.cur, layers.prev].forEach((l, i) => {
+    bendIdle.push(idle(() => {
+      if (S.flip === 'curl' && book && !l._strips && l.style.visibility !== 'hidden') buildBend(l);
+    }, { timeout: 400 + i * 200 }));
   });
-  void p0;
+}
+
+/* dir: 1 вперёд, -1 назад; to — куда довести (0..1), fromP — откуда */
+function animate(dir, to, done, fromP) {
+  prepareDrag(dir);
+  const from = fromP == null ? (dir > 0 ? 0 : 1) : fromP;
+  runFlip(dir, from, to, done);
+}
+
+/* собственная докрутка кадрами: CSS-переход не умеет вести изогнутый лист */
+let flipRAF = 0;
+function runFlip(dir, from, to, done) {
+  animating = true;
+  cancelAnimationFrame(flipRAF);
+  const dist = Math.abs(to - from);
+  const dur = Math.max(130, Math.round(S.flipSpeed * (0.4 + 0.6 * dist)));
+  const t0 = performance.now();
+  const ease = t => 1 - Math.pow(1 - t, 3);       // мягкое торможение
+  const tick = now => {
+    const t = Math.min(1, (now - t0) / dur);
+    applyDrag(dir, from + (to - from) * ease(t));
+    if (t < 1) { flipRAF = requestAnimationFrame(tick); return; }
+    animating = false;
+    done && done();
+  };
+  flipRAF = requestAnimationFrame(tick);
 }
 
 function prepareDrag(dir) {
@@ -318,20 +426,24 @@ function prepareDrag(dir) {
   under.style.transition = 'none';
   moving.style.zIndex = 3; under.style.zIndex = 2;
   (dir > 0 ? layers.prev : layers.next).style.zIndex = 0;
-  moving.classList.add('lift');
-  if (S.flip === 'curl') moving.style.transformOrigin = dir > 0 ? 'left center' : 'left center';
+  if (S.flip === 'curl') {
+    if (!moving._strips) buildBend(moving);
+    moving.classList.add('bending');
+    under.classList.add('under');
+  } else {
+    moving.classList.add('lift');
+  }
   applyDrag(dir, dir > 0 ? 0 : 1);
 }
 
 /* p: 0 — исходное, 1 — страница перевёрнута */
 function applyDrag(dir, p) {
   const moving = dir > 0 ? layers.cur : layers.prev;
+  const under  = dir > 0 ? layers.next : layers.cur;
   const q = clamp(p, 0, 1);
   if (S.flip === 'curl') {
-    const ang = -180 * q;
-    moving.style.transform = 'rotateY(' + ang + 'deg)';
-    moving.style.filter = 'brightness(' + (1 - 0.14 * Math.sin(Math.PI * q)) + ')';
-    moving.style.opacity = '1';
+    applyBend(moving, q);
+    under.style.setProperty('--ushade', (0.4 * Math.sin(Math.PI * q)).toFixed(3));
   } else if (S.flip === 'slide') {
     moving.style.transform = 'translateX(' + (-q * W - q * G) + 'px)';
     moving.style.filter = 'none';
@@ -368,30 +480,30 @@ vp.addEventListener('touchmove', e => {
     drag.target = n;
   }
   e.preventDefault();
-  const raw = drag.dir > 0 ? -dx / (W + G) : dx / (W + G);
+  const span = S.flip === 'curl' ? PW : (W + G);
+  const raw = drag.dir > 0 ? -dx / span : dx / span;
   const p = drag.dir > 0 ? clamp(raw, 0, 1) : clamp(1 - raw, 0, 1);
-  applyDrag(drag.dir, p);
   drag.p = p;
+  if (!drag.raf) drag.raf = requestAnimationFrame(() => {
+    if (!drag) return;
+    drag.raf = 0;
+    applyDrag(drag.dir, drag.p);
+  });
 }, { passive:false });
 
 vp.addEventListener('touchend', () => {
   if (!drag) return;
   const d = drag; drag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
   if (!d.moved) return;
   const travelled = d.dir > 0 ? d.p : 1 - d.p;
   const fast = (Date.now() - d.t0) < 260 && travelled > 0.08;
   const commit = travelled > 0.3 || fast;
   const end = d.dir > 0 ? (commit ? 1 : 0) : (commit ? 0 : 1);
-  animating = true;
-  const moving = d.dir > 0 ? layers.cur : layers.prev;
-  const dur = Math.round(S.flipSpeed * (0.45 + 0.55 * Math.abs(end - d.p)));
-  moving.style.transition = 'transform ' + dur + 'ms cubic-bezier(.22,.75,.3,1), opacity ' + dur + 'ms linear, filter ' + dur + 'ms linear';
-  applyDrag(d.dir, end);
-  setTimeout(() => {
-    animating = false;
+  runFlip(d.dir, d.p, end, () => {
     if (commit) { ci = d.target.c; pi = d.target.p; }
     render();
-  }, dur + 20);
+  });
 }, { passive:true });
 
 /* тапы */

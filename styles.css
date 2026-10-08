@@ -58,6 +58,34 @@ body[data-screen="reader"] #reader{display:block}
   background:linear-gradient(to right,rgba(0,0,0,.28),rgba(0,0,0,0) 14%,rgba(0,0,0,0) 86%,rgba(0,0,0,.22));
 }
 .page.lift::after{opacity:1}
+
+/* мягкий лист: страница собрана из вертикальных полосок */
+.page.bending{overflow:visible;background:transparent}
+.page.bending > .paper{visibility:hidden}
+.bend{position:absolute;inset:0;perspective:1800px;perspective-origin:50% 50%;pointer-events:none;visibility:hidden}
+.page.bending .bend{visibility:visible}
+.strip{
+  position:absolute;top:0;left:0;height:100%;
+  transform-origin:left center;transform-style:preserve-3d;
+  will-change:transform;
+}
+.strip > .face,.strip > .back{
+  position:absolute;inset:0;overflow:hidden;
+  backface-visibility:hidden;-webkit-backface-visibility:hidden;
+  background:var(--paper);
+}
+.strip > .back{transform:rotateY(180deg)}
+.strip .leaf{position:absolute;top:0;height:100%}
+.strip .through{opacity:.10;filter:blur(.4px)}
+.strip .shade{
+  position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;
+  will-change:opacity;
+}
+/* тень, которую загнутый лист кладёт на страницу под ним */
+.page.under::after{
+  background:linear-gradient(to right,rgba(0,0,0,.42),rgba(0,0,0,.12) 24%,rgba(0,0,0,0) 52%);
+  opacity:var(--ushade,0);
+}
 .paper{position:absolute;inset:0;padding:var(--pad-v) var(--pad-h) var(--pad-b);filter:brightness(var(--dimv,1))}
 .flow{height:100%;column-fill:auto;overflow:hidden;transform:translateZ(0)}
 
