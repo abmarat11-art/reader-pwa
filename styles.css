@@ -118,6 +118,12 @@ body[data-flip="scroll"] .page{display:none}
 .flow .poem p{text-indent:0;margin:0 0 .25em}
 .flow hr{border:0;border-top:1px solid var(--line);margin:1.6em 20%}
 .flow .chapter-title{margin-top:.2em;text-align:left}
+/* Главы склеены в один поток. Микропадинг не даёт внешним отступам главы
+   «протечь» сквозь её бокс: иначе окно главы и полная вёрстка книги разошлись бы
+   на высоту первого отступа, и страница поехала бы на пару строк. */
+.flow .ch{padding:.01px 0;display:block}
+.flow .chpad,.flow .chm{margin:0;padding:0;border:0}
+.flow .chm{height:0;overflow:hidden}
 .flow a{color:var(--accent);text-decoration:none}
 .flow sub,.flow sup{font-size:.7em}
 

@@ -40,10 +40,17 @@ const DEF = { theme:'soft', font:'ny', fsize:20, lheight:160, margin:24, justify
 
 let S = Object.assign({}, DEF, JSON.parse(localStorage.getItem('reader.settings') || '{}'));
 delete S.autoSpeed;                       // старая шкала строк/мин больше не используется
-/* 0 % — 40 строк/мин (прежний потолок), 100 % — вчетверо быстрее */
-const AUTO_BASE = 40;
-const autoLines = () => AUTO_BASE * (1 + 3 * clamp(S.autoPct, 0, 100) / 100);
+/* Шкала автопрокрутки. 0 % — на 30 % медленнее прежнего минимума (Марат просил
+   растянуть низ), 100 % — вчетверо быстрее прежнего минимума. */
+const AUTO_BASE = 40, AUTO_MIN = 0.7, AUTO_MAX = 4;
+const autoLines = () => AUTO_BASE * (AUTO_MIN + (AUTO_MAX - AUTO_MIN) * clamp(S.autoPct, 0, 100) / 100);
 const saveSettings = () => localStorage.setItem('reader.settings', JSON.stringify(S));
+/* прежнее значение переводим в новую шкалу один раз, чтобы скорость не прыгнула */
+if (!S.spd3) {
+  const was = 1 + 3 * clamp(S.autoPct, 0, 100) / 100;          // во сколько раз быстрее базы
+  S.autoPct = Math.round(clamp((was - AUTO_MIN) / (AUTO_MAX - AUTO_MIN) * 100, 0, 100));
+  S.spd3 = true; saveSettings();
+}
 
 /* ====================== хранилище ====================== */
 const DB = (() => {
@@ -141,9 +148,18 @@ $('#filePick').onchange = async e => {
 
 $('#installHint').onclick = () => toast('Safari → «Поделиться» → «На экран «Домой»». Дальше читалка открывается как приложение и работает без интернета.', 5200);
 
-/* ====================== состояние чтения ====================== */
-let book = null, ci = 0, pi = 0;
-let pages = {};               // ci → число страниц при текущих метриках
+/* ====================== состояние чтения ======================
+   Книга — один сплошной поток. Главы склеены в <section class="ch">,
+   нумерация страниц сквозная по всей книге: страница не обязана начинаться
+   с главы, и граница глав ничем не отличается от любой другой строки.
+   Оглавление остаётся: у каждой главы известны её страница и смещение. */
+let book = null, ci = 0, pi = 0;         // pi — сквозной номер страницы книги
+let total = 1;                            // всего страниц при текущих метриках
+let chHTML = [];                           // главы как куски разметки
+let chMeta = [];                           // по главам: { page, top } в постраничной вёрстке
+let svMeta = null;
+let ciHint = null;                         // куда шли из оглавления                         // по главам: смещение в свитке, px
+let measured = false;
 let metricsKey = '';
 const layers = { prev: $('.page[data-rel="-1"]'), cur: $('.page[data-rel="0"]'), next: $('.page[data-rel="1"]') };
 const sv = $('#scrollView');
@@ -176,7 +192,7 @@ function measureBox() {
   H = vp.clientHeight - Math.max(14, S.margin * 0.8) * 2 - 20;
   G = Math.max(16, S.margin);
   const key = [W, H, S.font, S.fsize, S.lheight, S.margin, S.justify, S.hyphens, S.indent].join('|');
-  if (key !== metricsKey) { metricsKey = key; pages = {}; }
+  if (key !== metricsKey) { metricsKey = key; measured = false; svMeta = null; }
 }
 
 function innerOf(layer) {
@@ -186,43 +202,136 @@ function innerOf(layer) {
   return inner;
 }
 
-/* наполнить слой главой ci и показать страницу p */
-function fillLayer(layer, c, p) {
+function buildFlow() {
+  /* Перед каждой главой — пустая метка нулевой высоты. По ней мы узнаём,
+     где глава начинается: у самой главы, разрезанной колонками, прямоугольник
+     склеен из кусков, и верх по нему не прочитать. */
+  chHTML = book.chapters.map((c, i) =>
+    '<div class="chm" data-ci="' + i + '"></div>' +
+    '<section class="ch" data-ci="' + i + '">' + (c.html || '') + '</section>');
+  chMeta = []; svMeta = null; measured = false;
+}
+
+const colCss = () => 'width:' + W + 'px;height:' + H + 'px;column-width:' + W +
+  'px;column-gap:' + G + 'px;column-fill:auto;transform:translateX(0)';
+
+/* первый фрагмент элемента: у разрезанного колонками блока
+   getBoundingClientRect склеивает все куски, нам нужен самый первый */
+function firstRect(el) {
+  const rs = el.getClientRects();
+  return rs.length ? rs[0] : el.getBoundingClientRect();
+}
+
+/* метки начала глав — они не разрезаются, их место точно */
+const chMarks = root => [...root.querySelectorAll('.chm')];
+
+/* Полная вёрстка книги один раз на набор метрик: сквозное число страниц
+   и место каждой главы. Считаем на «тыльном» слое — его всё равно перезальём. */
+function measurePages() {
+  if (measured) return;
+  const inner = innerOf(layers.next);
+  inner.innerHTML = chHTML.join('');
+  inner.style.cssText = colCss();
+  layers.next.dataset.win = 'master';
+  const ir = inner.getBoundingClientRect();
+  total = Math.max(1, Math.round((inner.scrollWidth + G) / (W + G)));
+  chMeta = chMarks(inner).map(m => {
+    const r = m.getBoundingClientRect();
+    return {
+      page: clamp(Math.round((r.left - ir.left) / (W + G)), 0, total - 1),
+      top: Math.max(0, Math.round(r.top - ir.top))
+    };
+  });
+  if (!chMeta.length) chMeta = [{ page:0, top:0 }];
+  measured = true;
+  watchFonts();
+  watchImages(inner);
+}
+
+/* Шрифт в момент первой вёрстки может быть ещё не готов — тогда строки шире
+   или уже, и разбивка на страницы уезжает (на книге в 800 страниц — на страницу).
+   Дожидаемся шрифтов один раз на набор метрик и пересчитываем. */
+let fontWaitKey = '';
+function watchFonts() {
+  if (!document.fonts || document.fonts.status === 'loaded') return;
+  if (fontWaitKey === metricsKey) return;
+  fontWaitKey = metricsKey;
+  document.fonts.ready.then(() => { if (book) relayout(); });
+}
+
+/* Картинки до загрузки занимают нулевую высоту, и вся разбивка уезжает.
+   Дожидаемся их один раз на набор метрик и пересчитываем вёрстку. */
+let imgWaitKey = '';
+function watchImages(inner) {
+  if (imgWaitKey === metricsKey) return;
+  const imgs = [...inner.querySelectorAll('img')].filter(im => !im.complete);
+  if (!imgs.length) return;
+  imgWaitKey = metricsKey;
+  let left = imgs.length;
+  const done = () => { if (--left === 0) relayout(); };
+  imgs.forEach(im => {
+    im.addEventListener('load', done, { once:true });
+    im.addEventListener('error', done, { once:true });
+  });
+}
+
+/* какая глава идёт на странице p */
+function chapterAt(p) {
+  let c = 0;
+  for (let i = 0; i < chMeta.length; i++) { if (chMeta[i].page <= p) c = i; else break; }
+  // переход из оглавления: если на странице началось несколько глав, показываем ту, куда шли
+  if (ciHint != null && chMeta[ciHint] && chMeta[ciHint].page === p) c = ciHint;
+  return c;
+}
+
+/* Окно глав для страницы p. Назад берём главу, начавшуюся раньше этой страницы
+   (её хвост лежит на этой же странице), вперёд — то, что начинается на следующей
+   странице и ещё одну главу сверху: заголовок с «break-after:avoid» смотрит вперёд,
+   и без запаса он уехал бы в другую колонку, чем в полной вёрстке.
+   Отступ сверху равен тому, что в полной вёрстке занято до начала окна, —
+   поэтому разрывы строк и колонок совпадают с полной вёрсткой до пикселя. */
+function windowFor(p) {
+  let first = chapterAt(p);
+  while (first > 0 && chMeta[first].page >= p) first--;
+  let last = chapterAt(p + 1);
+  if (last + 1 < chMeta.length) last++;
+  if (last < first) last = first;
+  return { first, last };
+}
+
+/* Главы после текущей нужны только затем, чтобы заголовок с «break-after:avoid»
+   не уехал в другую колонку, чем в полной вёрстке: ему важен следующий блок,
+   а не вся глава. Оставляем от них несколько блоков — вёрстка та же, а копий
+   страницы для мягкого листа (их 28) браузер считает вдвое меньше. */
+const AHEAD_BLOCKS = 4;
+function trimAhead(inner, curCi) {
+  inner.querySelectorAll('section.ch').forEach(sec => {
+    if (+sec.dataset.ci <= curCi) return;
+    const kids = [...sec.children];
+    kids.slice(AHEAD_BLOCKS).forEach(n => n.remove());
+  });
+}
+
+/* наполнить слой так, чтобы он показывал сквозную страницу p */
+function fillLayer(layer, p) {
+  measurePages();
+  p = clamp(p, 0, total - 1);
+  const w = windowFor(p);
+  const key = w.first + ':' + w.last + ':' + metricsKey;
   const inner = innerOf(layer);
-  if (layer.dataset.ch !== String(c) || layer.dataset.mk !== metricsKey) {
-    inner.innerHTML = (book.chapters[c] || { html:'' }).html;
-    layer.dataset.ch = String(c);
-    layer.dataset.mk = metricsKey;
-    inner.style.cssText = 'width:' + W + 'px;height:' + H + 'px;column-width:' + W +
-      'px;column-gap:' + G + 'px;column-fill:auto;transform:translateX(0)';
-    const sw = inner.scrollWidth;
-    pages[c] = Math.max(1, Math.round((sw + G) / (W + G)));
+  if (layer.dataset.win !== key) {
+    const pad = chMeta[w.first].top;
+    inner.innerHTML = (pad > 0 ? '<div class="chpad" style="height:' + pad + 'px"></div>' : '') +
+      chHTML.slice(w.first, w.last + 1).join('');
+    trimAhead(inner, chapterAt(p));
+    inner.style.cssText = colCss();
+    layer.dataset.win = key;
+    layer.dataset.base = String(chMeta[w.first].page);
   }
-  const np = pages[c] || 1;
-  p = clamp(p, 0, np - 1);
-  inner.style.transform = 'translateX(' + (-p * (W + G)) + 'px)';
+  const base = +layer.dataset.base || 0;
+  inner.style.transform = 'translateX(' + (-(p - base) * (W + G)) + 'px)';
   layer.dataset.pi = String(p);
   return p;
-}
-
-function pagesOf(c) {
-  if (pages[c] != null) return pages[c];
-  fillLayer(layers.next, c, 0);     // замер на «тыльном» слое
-  return pages[c] || 1;
-}
-
-/* соседняя позиция через границы глав */
-function neighbor(dir) {
-  const np = pagesOf(ci);
-  if (dir > 0) {
-    if (pi + 1 < np) return { c:ci, p:pi + 1 };
-    if (ci + 1 < book.chapters.length) return { c:ci + 1, p:0 };
-    return null;
-  } else {
-    if (pi - 1 >= 0) return { c:ci, p:pi - 1 };
-    if (ci - 1 >= 0) return { c:ci - 1, p:pagesOf(ci - 1) - 1 };
-    return null;
-  }
 }
 
 function resetTransforms() {
@@ -242,12 +351,13 @@ function render() {
   if (!book) return;
   if (S.flip === 'scroll') { renderScroll(); return; }
   measureBox();
-  pi = fillLayer(layers.cur, ci, pi);
-  const nx = neighbor(1), pv = neighbor(-1);
-  if (nx) { fillLayer(layers.next, nx.c, nx.p); layers.next.style.visibility = 'visible'; }
+  measurePages();
+  pi = fillLayer(layers.cur, pi);
+  if (pi + 1 < total) { fillLayer(layers.next, pi + 1); layers.next.style.visibility = 'visible'; }
   else layers.next.style.visibility = 'hidden';
-  if (pv) { fillLayer(layers.prev, pv.c, pv.p); layers.prev.style.visibility = 'visible'; }
+  if (pi - 1 >= 0) { fillLayer(layers.prev, pi - 1); layers.prev.style.visibility = 'visible'; }
   else layers.prev.style.visibility = 'hidden';
+  ci = chapterAt(pi);
   resetTransforms();
   updateStatus();
   saveProgress();
@@ -257,43 +367,64 @@ function render() {
 function renderScroll() {
   measureBox();
   const inner = innerOf(sv);
-  if (sv.dataset.ch !== String(ci)) {
-    inner.innerHTML = book.chapters[ci].html;
+  const key = 'all:' + metricsKey;
+  if (sv.dataset.win !== key) {
+    inner.innerHTML = chHTML.join('');
     inner.style.cssText = '';
-    sv.dataset.ch = String(ci);
-    sv.scrollTop = 0;
+    sv.dataset.win = key;
+    svMeta = null;
+    watchFonts();
+    watchImages(inner);
   }
   updateStatus();
   saveProgress();
 }
 
-function globalProgress() {
-  const n = book.chapters.length;
-  if (S.flip === 'scroll') {
-    const max = sv.scrollHeight - sv.clientHeight;
-    const f = max > 0 ? svOffset() / max : 0;
-    return clamp((ci + f) / n, 0, 1);
+/* смещения глав в свитке — для оглавления и строки состояния */
+function svTops() {
+  if (!svMeta) {
+    const inner = innerOf(sv);
+    if (!inner.firstChild) return [0];
+    const base = sv.getBoundingClientRect().top - sv.scrollTop;
+    svMeta = chMarks(inner).map(m => Math.max(0, Math.round(m.getBoundingClientRect().top - base)));
+    if (!svMeta.length) svMeta = [0];
   }
-  const np = pagesOf(ci);
-  return clamp((ci + (np > 1 ? pi / (np - 1 || 1) : 0)) / n, 0, 1);
+  return svMeta;
+}
+
+function globalProgress() {
+  if (S.flip === 'scroll') {
+    const max = svMax();
+    return clamp(max > 0 ? sv.scrollTop / max : 0, 0, 1);
+  }
+  return clamp(total > 1 ? pi / (total - 1) : 0, 0, 1);
 }
 
 function updateStatus() {
-  const np = pages[ci] || 1;
-  $('#stChapter').textContent = (book.chapters[ci].title || '').slice(0, 42);
-  $('#stPage').textContent = (pi + 1) + ' / ' + np;
+  if (S.flip === 'scroll') {
+    const tops = svTops();
+    let c = 0;
+    for (let i = 0; i < tops.length; i++) { if (tops[i] <= sv.scrollTop + 8) c = i; else break; }
+    ci = c;
+    $('#stPage').textContent = 'гл. ' + (ci + 1) + ' / ' + book.chapters.length;
+  } else {
+    $('#stPage').textContent = (pi + 1) + ' / ' + total;
+  }
+  $('#stChapter').textContent = ((book.chapters[ci] || {}).title || '').slice(0, 42);
   const g = globalProgress();
   $('#seek').value = Math.round(g * 1000);
   $('#hudPos').textContent = Math.round(g * 100) + '%';
   $('#hudTitle').textContent = book.title;
 }
 
-let saveT;
+let saveT, saveLast = 0;
 function stateNow() {
-  return { id:book.id, ci, pi, progress:globalProgress(),
-    scroll: S.flip === 'scroll' ? svOffset() : 0, at: Date.now() };
+  return { id:book.id, v:2, mk:metricsKey, ci, pi, progress:globalProgress(),
+    scroll: S.flip === 'scroll' ? sv.scrollTop : 0, at: Date.now() };
 }
 function saveProgress(now) {
+  if (!now && Date.now() - saveLast < 400) return;   // автопрокрутка зовёт это каждый кадр
+  saveLast = Date.now();
   const st = stateNow();
   localStorage.setItem('reader.last', JSON.stringify(st));   // запись мгновенная
   clearTimeout(saveT);
@@ -304,12 +435,18 @@ function saveProgress(now) {
 /* ====================== переход страниц ====================== */
 let animating = false;
 
+function neighbor(dir) {
+  const t = pi + dir;
+  return (t >= 0 && t < total) ? t : null;
+}
+
 function go(dir) {
   if (animating || !book) return;
+  ciHint = null; pendingSt = null;
   if (S.flip === 'scroll') { scrollPage(dir); return; }
   const t = neighbor(dir);
-  if (!t) { toast(dir > 0 ? 'Это конец книги' : 'Это начало книги', 1200); return; }
-  animate(dir, 1, () => { ci = t.c; pi = t.p; render(); });
+  if (t == null) { toast(dir > 0 ? 'Это конец книги' : 'Это начало книги', 1200); return; }
+  animate(dir, 1, () => { pi = t; render(); });
 }
 
 /* ====================== мягкий лист ======================
@@ -486,7 +623,7 @@ vp.addEventListener('touchmove', e => {
     if (Math.abs(dx) < 10 || Math.abs(dx) < Math.abs(dy)) return;
     drag.dir = dx < 0 ? 1 : -1;
     const n = neighbor(drag.dir);
-    if (!n) { drag = null; return; }
+    if (n == null) { drag = null; return; }
     drag.moved = true;
     prepareDrag(drag.dir);
     drag.target = n;
@@ -513,7 +650,7 @@ vp.addEventListener('touchend', () => {
   const commit = travelled > 0.3 || fast;
   const end = d.dir > 0 ? (commit ? 1 : 0) : (commit ? 0 : 1);
   runFlip(d.dir, d.p, end, () => {
-    if (commit) { ci = d.target.c; pi = d.target.p; }
+    if (commit) pi = d.target;
     render();
   });
 }, { passive:true });
@@ -523,64 +660,40 @@ $('#tapLeft').onclick  = () => go(-1);
 $('#tapRight').onclick = () => go(1);
 $('#tapMid').onclick   = () => toggleHud();
 
-/* ====================== свиток и автопрокрутка ====================== */
+/* ====================== свиток и автопрокрутка ======================
+   Книга в свитке смонтирована целиком, поэтому прокрутка через границу главы
+   ничем не отличается от прокрутки внутри главы: ни подмены содержимого,
+   ни прыжков. */
 function scrollPage(dir) {
   const step = sv.clientHeight * 0.9 * dir;
   sv.scrollBy({ top:step, behavior:'smooth' });
 }
 
+const svMax = () => Math.max(0, sv.scrollHeight - sv.clientHeight);
+
 sv.addEventListener('scroll', () => {
   if (!book) return;
-  const max = sv.scrollHeight - sv.clientHeight;
-  if (sv.scrollTop >= max - 2 && ci + 1 < book.chapters.length && !svLock) {
-    svLock = true;
-    ci++; sv.dataset.ch = ''; renderScroll();
-    setTimeout(() => svLock = false, 400);
-  } else if (sv.scrollTop <= 0 && ci > 0 && !svLock && autoOn === false && lastScrollDir < 0) {
-    svLock = true;
-    ci--; sv.dataset.ch = ''; renderScroll();
-    sv.scrollTop = sv.scrollHeight;
-    setTimeout(() => svLock = false, 400);
-  }
-  lastScrollDir = sv.scrollTop - lastScrollTop; lastScrollTop = sv.scrollTop;
   updateStatus(); saveProgress();
 }, { passive:true });
-let svLock = false, lastScrollTop = 0, lastScrollDir = 0;
 
 let autoOn = false, autoRaf = 0, autoLast = 0, autoY = 0;
 
-/* положение в свитке: во время автопрокрутки текст сдвинут трансформом,
-   сам контейнер при этом стоит на нуле */
-const svOffset = () => autoOn ? autoY : sv.scrollTop;
-const svMax = () => Math.max(0, sv.scrollHeight - sv.clientHeight);
-
-/* Сдвиг трансформом, а не scrollTop: слой едет на композиторе, текст не
-   перерисовывается каждый кадр и не оставляет за собой шлейф. Округляем до
-   физического пикселя, иначе глифы мылятся. */
+/* Округляем до физического пикселя: на дробных смещениях глифы мылятся
+   и текст тянет за собой шлейф. */
 function autoApply() {
-  const inner = innerOf(sv);
   const dpr = window.devicePixelRatio || 1;
-  inner.style.transform = 'translate3d(0,' + (-Math.round(autoY * dpr) / dpr) + 'px,0)';
-}
-function autoDetach() {
-  const inner = innerOf(sv);
-  inner.style.transform = '';
-  inner.style.willChange = '';
-  sv.style.overflowY = '';
+  sv.scrollTop = Math.round(autoY * dpr) / dpr;
 }
 function autoStart() {
   if (!book) return;
   if (S.flip !== 'scroll') {
     S.flip = 'scroll'; saveSettings(); applyStyleVars(); syncSheet();
-    sv.dataset.ch = ''; renderScroll();
+    renderScroll();
     toast('Включил «Свиток» — автопрокрутка работает в нём');
   }
   autoY = sv.scrollTop;
   autoOn = true; autoLast = 0;
-  sv.scrollTop = 0;
   sv.style.overflowY = 'hidden';          // чтобы палец и автопрокрутка не спорили
-  innerOf(sv).style.willChange = 'transform';
-  autoApply();
   $('#autoBar').classList.add('show');
   document.body.classList.add('auto');
   $('#autoBtn').textContent = '❚❚';
@@ -591,13 +704,7 @@ function autoStart() {
       autoY += lh * autoLines() / 60000 * Math.min(100, ts - autoLast);
       const max = svMax();
       if (autoY >= max) {
-        if (ci + 1 < book.chapters.length) {
-          ci++; sv.dataset.ch = ''; renderScroll();
-          autoY = 0; sv.scrollTop = 0;
-          innerOf(sv).style.willChange = 'transform';
-        } else {
-          autoY = max; autoApply(); autoStop(); toast('Книга дочитана'); return;
-        }
+        autoY = max; autoApply(); autoStop(); toast('Книга дочитана'); return;
       }
       autoApply();
       updateStatus(); saveProgress();
@@ -608,19 +715,13 @@ function autoStart() {
   autoRaf = requestAnimationFrame(tick);
 }
 function autoStop() {
-  if (!autoOn) {
-    $('#autoBar').classList.remove('show');
-    document.body.classList.remove('auto');
-    $('#autoBtn').textContent = '▶'; return;
-  }
-  const y = autoY;
+  const was = autoOn;
   autoOn = false; cancelAnimationFrame(autoRaf);
-  autoDetach();
-  sv.scrollTop = y;
+  sv.style.overflowY = '';
   $('#autoBar').classList.remove('show');
   document.body.classList.remove('auto');
   $('#autoBtn').textContent = '▶';
-  saveProgress();
+  if (was) saveProgress(true);
 }
 $('#autoBtn').onclick = () => autoOn ? autoStop() : autoStart();
 $('#autoStop').onclick = autoStop;
@@ -697,7 +798,7 @@ $('#tocBtn').onclick = () => {
     a.appendChild(sp);
     a.onclick = () => {
       $('#tocWrap').classList.remove('show');
-      ci = i; pi = 0; sv.dataset.ch = ''; render();
+      gotoChapter(i);
     };
     list.appendChild(a);
   });
@@ -708,19 +809,33 @@ $$('.sheet-tabs .tab').forEach(t => t.onclick = () => {
   $$('.tabpane').forEach(p => p.classList.toggle('active', p.dataset.pane === t.dataset.tab));
 });
 
+/* переход к главе из оглавления: сквозной текст, но навигация по главам жива */
+function gotoChapter(i) {
+  if (!book) return;
+  autoStop();
+  pendingSt = null;
+  if (S.flip === 'scroll') {
+    renderScroll();
+    const tops = svTops();
+    sv.scrollTop = clamp(tops[i] || 0, 0, svMax());
+    updateStatus(); saveProgress(true);
+  } else {
+    measureBox(); measurePages();
+    ciHint = i;
+    pi = clamp((chMeta[i] || { page:0 }).page, 0, total - 1);
+    render();
+  }
+}
+
 $('#seek').oninput = e => {
   if (!book) return;
-  const g = +e.target.value / 1000;
-  const n = book.chapters.length;
-  let c = clamp(Math.floor(g * n), 0, n - 1);
-  const frac = g * n - c;
-  ci = c;
+  ciHint = null; pendingSt = null;
+  const g = clamp(+e.target.value / 1000, 0, 1);
   if (S.flip === 'scroll') {
-    sv.dataset.ch = ''; renderScroll();
-    sv.scrollTop = (sv.scrollHeight - sv.clientHeight) * frac;
+    sv.scrollTop = Math.round(g * svMax());
   } else {
-    pi = 0; render();
-    pi = clamp(Math.round(frac * ((pages[ci] || 1) - 1)), 0, (pages[ci] || 1) - 1);
+    measureBox(); measurePages();
+    pi = clamp(Math.round(g * (total - 1)), 0, total - 1);
     render();
   }
   hud(true);
@@ -751,8 +866,19 @@ function buildSheet() {
     b.className = (S.flip === f.id ? 'on' : ''); b.textContent = f.name; b.dataset.id = f.id;
     b.onclick = () => {
       autoStop();
+      const g = book ? globalProgress() : 0;
       S.flip = f.id; saveSettings(); applyStyleVars(); syncSheet();
-      sv.dataset.ch = ''; metricsKey = ''; render();
+      if (!book) return;
+      metricsKey = ''; measured = false; svMeta = null;
+      if (S.flip === 'scroll') {
+        renderScroll();
+        sv.scrollTop = Math.round(g * svMax());
+        updateStatus();
+      } else {
+        measureBox(); measurePages();
+        pi = clamp(Math.round(g * (total - 1)), 0, total - 1);
+        render();
+      }
     };
     fm.appendChild(b);
   });
@@ -767,21 +893,31 @@ function syncSheet() {
   $('#autoSpeed').value = S.autoPct; $('#autoSpeed2').value = S.autoPct;
   speedLabel();
 }
-let relayoutT;
+let relayoutT, pendingSt = null, pendingTill = 0;
 function relayout() {
   clearTimeout(relayoutT);
   relayoutT = setTimeout(() => {
     if (!book) return;
+    if (pendingSt && Date.now() > pendingTill) pendingSt = null;
+    if (pendingSt) {                      // пересчёты сразу после открытия книги
+      const st = pendingSt;
+      metricsKey = ''; measured = false; svMeta = null;
+      [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.win = '');
+      sv.dataset.win = '';
+      restoreState(st);
+      return;
+    }
     const g = globalProgress();
-    metricsKey = ''; pages = {};
-    [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.ch = '');
-    if (S.flip === 'scroll') { renderScroll(); }
-    else {
-      measureBox();
-      const np = pagesOf(ci);
-      const n = book.chapters.length;
-      const frac = clamp(g * n - ci, 0, 1);
-      pi = clamp(Math.round(frac * (np - 1)), 0, np - 1);
+    metricsKey = ''; measured = false; svMeta = null;
+    [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.win = '');
+    sv.dataset.win = '';
+    if (S.flip === 'scroll') {
+      renderScroll();
+      sv.scrollTop = Math.round(g * svMax());
+      updateStatus();
+    } else {
+      measureBox(); measurePages();
+      pi = clamp(Math.round(g * (total - 1)), 0, total - 1);
       render();
     }
   }, 60);
@@ -799,6 +935,30 @@ bind('#dim', 'dim');
 });
 
 /* ====================== открыть книгу ====================== */
+/* Вернуть книгу на сохранённое место. Номер страницы годится только при тех же
+   метриках (шрифт, размер, поля); иначе ведём по доле прочитанного. */
+function restoreState(st) {
+  measureBox();
+  const exact = st.v === 2 && st.mk === metricsKey;
+  const g = clamp(st.progress || 0, 0, 1);
+  const c = clamp(st.ci || 0, 0, chHTML.length - 1);
+  if (S.flip === 'scroll') {
+    renderScroll();
+    let y;
+    if (exact) y = st.scroll || 0;
+    else if (st.v === 2) y = g * svMax();
+    else y = (svTops()[c] || 0) + (st.scroll || 0);     // старая запись: смещение внутри главы
+    sv.scrollTop = clamp(Math.round(y), 0, svMax());
+    updateStatus(); saveProgress(true);
+  } else {
+    measurePages();
+    if (exact) pi = clamp(st.pi || 0, 0, total - 1);
+    else if (st.v === 2) pi = clamp(Math.round(g * (total - 1)), 0, total - 1);
+    else pi = clamp((chMeta[c] || { page:0 }).page + (st.pi || 0), 0, total - 1);
+    render();
+  }
+}
+
 async function openBook(id) {
   loader(true, 'Открываю…');
   book = await DB.get('books', id);
@@ -808,18 +968,25 @@ async function openBook(id) {
     const q = JSON.parse(localStorage.getItem('reader.last') || 'null');
     if (q && q.id === id && (q.at || 0) > (st.at || 0)) st = q;
   } catch (e) { /* неважно */ }
-  ci = clamp(st.ci || 0, 0, book.chapters.length - 1); pi = st.pi || 0;
   document.body.dataset.screen = 'reader';
   localStorage.setItem('reader.openLast', '1');
   applyStyleVars();
-  metricsKey = ''; pages = {};
-  [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.ch = '');
-  sv.dataset.ch = '';
+  buildFlow();
+  metricsKey = '';
+  [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.win = '');
+  sv.dataset.win = '';
+  ci = clamp(st.ci || 0, 0, book.chapters.length - 1);
+  pendingSt = st; pendingTill = Date.now() + 2000;
   requestAnimationFrame(() => {
-    render();
-    if (S.flip === 'scroll' && st.scroll) sv.scrollTop = st.scroll;
+    restoreState(st);
     loader(false);
     hud(true);
+    /* Первая вёрстка почти всегда «предварительная»: шрифт ещё не готов, картинки
+       (в том числе data:-обложка) ещё не декодированы и занимают нулевую высоту —
+       на книге в 800 страниц разбивка уезжает на страницу. Пересчитываем, когда
+       всё устоялось, и возвращаемся на сохранённое место точно. */
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => relayout());
+    setTimeout(relayout, 700);
   });
 }
 
@@ -858,6 +1025,18 @@ renderShelf().then(async () => {
         q && q.id && await DB.get('books', q.id)) openBook(q.id);
   } catch (e) { /* остаёмся в библиотеке */ }
 });
+
+/* ручка для автотеста: состояние движка и шаги без касаний экрана */
+window.RDR = {
+  state: () => ({ ci, pi, total, flip:S.flip, autoPct:S.autoPct, lines:autoLines(),
+    scroll: sv.scrollTop, max: svMax(), chMeta, progress: globalProgress(),
+    chapters: book ? book.chapters.length : 0,
+    page: () => innerOf(layers.cur).textContent }),
+  go, gotoChapter, openBook, render, relayout,
+  set: (k, v) => { S[k] = v; saveSettings(); applyStyleVars(); },
+  seek: g => { $('#seek').value = Math.round(g * 1000); $('#seek').oninput({ target:$('#seek') }); },
+  autoStart, autoStop, saveProgress, DB
+};
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
