@@ -385,7 +385,8 @@ function svTops() {
   if (!svMeta) {
     const inner = innerOf(sv);
     if (!inner.firstChild) return [0];
-    const base = sv.getBoundingClientRect().top - sv.scrollTop;
+    // при автопрокрутке текст сдвинут трансформом, а контейнер стоит на нуле
+    const base = sv.getBoundingClientRect().top - sv.scrollTop - (autoOn ? autoY : 0);
     svMeta = chMarks(inner).map(m => Math.max(0, Math.round(m.getBoundingClientRect().top - base)));
     if (!svMeta.length) svMeta = [0];
   }
@@ -395,7 +396,7 @@ function svTops() {
 function globalProgress() {
   if (S.flip === 'scroll') {
     const max = svMax();
-    return clamp(max > 0 ? sv.scrollTop / max : 0, 0, 1);
+    return clamp(max > 0 ? svOffset() / max : 0, 0, 1);
   }
   return clamp(total > 1 ? pi / (total - 1) : 0, 0, 1);
 }
@@ -404,7 +405,8 @@ function updateStatus() {
   if (S.flip === 'scroll') {
     const tops = svTops();
     let c = 0;
-    for (let i = 0; i < tops.length; i++) { if (tops[i] <= sv.scrollTop + 8) c = i; else break; }
+    const y = svOffset();
+    for (let i = 0; i < tops.length; i++) { if (tops[i] <= y + 8) c = i; else break; }
     ci = c;
     $('#stPage').textContent = 'гл. ' + (ci + 1) + ' / ' + book.chapters.length;
   } else {
@@ -420,10 +422,10 @@ function updateStatus() {
 let saveT, saveLast = 0;
 function stateNow() {
   return { id:book.id, v:2, mk:metricsKey, ci, pi, progress:globalProgress(),
-    scroll: S.flip === 'scroll' ? sv.scrollTop : 0, at: Date.now() };
+    scroll: S.flip === 'scroll' ? Math.round(svOffset()) : 0, at: Date.now() };
 }
 function saveProgress(now) {
-  if (!now && Date.now() - saveLast < 400) return;   // автопрокрутка зовёт это каждый кадр
+  if (!now && Date.now() - saveLast < (autoOn ? 2000 : 400)) return;
   saveLast = Date.now();
   const st = stateNow();
   localStorage.setItem('reader.last', JSON.stringify(st));   // запись мгновенная
@@ -669,21 +671,72 @@ function scrollPage(dir) {
   sv.scrollBy({ top:step, behavior:'smooth' });
 }
 
-const svMax = () => Math.max(0, sv.scrollHeight - sv.clientHeight);
+let svMaxC = 0;
+const svMax = () => autoOn ? svMaxC : Math.max(0, sv.scrollHeight - sv.clientHeight);
 
 sv.addEventListener('scroll', () => {
-  if (!book) return;
+  if (!book || autoOn) return;            // при автопрокрутке состояние ведёт её собственный шаг
   updateStatus(); saveProgress();
 }, { passive:true });
 
-let autoOn = false, autoRaf = 0, autoLast = 0, autoY = 0;
+/* ---------- автопрокрутка ----------
+   Ход ведёт композитор: один CSS-переход `transform` линейно на несколько секунд
+   вперёд. Так движение не зависит от занятости главного потока и идёт с точностью
+   до доли пикселя. Через `scrollTop` текст дёргался: смещение квантуется по
+   пикселю, а на 28 строках в минуту это меньше трети пикселя за кадр.
+   Положение считаем по времени, а не читаем из вёрстки, — чтобы на каждом кадре
+   не заставлять браузер пересчитывать 800-страничный документ. */
+const AUTO_CHUNK = 20000;                 // на сколько вперёд заводим переход, мс
+let autoOn = false, autoY = 0, autoFrom = 0, autoTo = 0, autoT0 = 0, autoDur = 0;
+let autoTimer = 0, autoStatusTimer = 0;
 
-/* Округляем до физического пикселя: на дробных смещениях глифы мылятся
-   и текст тянет за собой шлейф. */
-function autoApply() {
+const autoSpeedPx = () => S.fsize * (S.lheight / 100) * autoLines() / 60;   // px/с
+const svOffset = () => autoOn ? autoY : sv.scrollTop;
+
+function autoSetY(y) {
+  autoY = clamp(y, 0, svMaxC);
   const dpr = window.devicePixelRatio || 1;
-  sv.scrollTop = Math.round(autoY * dpr) / dpr;
+  innerOf(sv).style.transform = 'translate3d(0,' + (-Math.round(autoY * dpr) / dpr) + 'px,0)';
 }
+
+/* завести очередной отрезок хода */
+function autoArm() {
+  const inner = innerOf(sv);
+  const sp = autoSpeedPx();
+  const left = svMaxC - autoY;
+  if (left <= 0.5 || sp <= 0) { autoStop(); toast('Книга дочитана'); return; }
+  const span = Math.min(left, sp * AUTO_CHUNK / 1000);
+  autoFrom = autoY; autoTo = autoY + span;
+  autoDur = span / sp * 1000;
+  inner.style.transition = 'none';
+  autoSetY(autoFrom);
+  void inner.offsetHeight;                // зафиксировать начало, иначе переход «съест» его
+  inner.style.transition = 'transform ' + Math.round(autoDur) + 'ms linear';
+  inner.style.transform = 'translate3d(0,' + (-autoTo) + 'px,0)';
+  autoT0 = performance.now();
+  clearTimeout(autoTimer);
+  // заводим следующий отрезок чуть раньше конца и от фактического места:
+  // так между отрезками нет паузы на кадр
+  autoTimer = setTimeout(() => { if (autoOn) { autoY = autoNow(); autoArm(); } },
+    Math.max(120, autoDur - 200));
+}
+
+/* где мы сейчас. Спрашиваем у браузера текущее значение перехода — он честно
+   отдаёт промежуточное; оценка по времени остаётся на случай, если не вышло
+   (переход начинается на кадр-два позже, чем мы его завели). */
+function autoNow() {
+  const tr = getComputedStyle(innerOf(sv)).transform;
+  if (tr && tr !== 'none' && window.DOMMatrixReadOnly) {
+    try {
+      const y = -new DOMMatrixReadOnly(tr).m42;
+      if (isFinite(y)) return clamp(y, 0, svMaxC);
+    } catch (e) { /* считаем по времени */ }
+  }
+  if (!autoDur) return autoY;
+  const t = clamp((performance.now() - autoT0) / autoDur, 0, 1);
+  return autoFrom + (autoTo - autoFrom) * t;
+}
+
 function autoStart() {
   if (!book) return;
   if (S.flip !== 'scroll') {
@@ -691,38 +744,46 @@ function autoStart() {
     renderScroll();
     toast('Включил «Свиток» — автопрокрутка работает в нём');
   }
+  svMaxC = Math.max(0, sv.scrollHeight - sv.clientHeight);
   autoY = sv.scrollTop;
-  autoOn = true; autoLast = 0;
+  autoOn = true;
+  sv.scrollTop = 0;
   sv.style.overflowY = 'hidden';          // чтобы палец и автопрокрутка не спорили
+  innerOf(sv).style.willChange = 'transform';
   $('#autoBar').classList.add('show');
   document.body.classList.add('auto');
   $('#autoBtn').textContent = '❚❚';
-  const tick = ts => {
+  autoArm();
+  clearInterval(autoStatusTimer);         // проценты и позиция — четыре раза в секунду, не каждый кадр
+  autoStatusTimer = setInterval(() => {
     if (!autoOn) return;
-    if (autoLast) {
-      const lh = S.fsize * (S.lheight / 100);
-      autoY += lh * autoLines() / 60000 * Math.min(100, ts - autoLast);
-      const max = svMax();
-      if (autoY >= max) {
-        autoY = max; autoApply(); autoStop(); toast('Книга дочитана'); return;
-      }
-      autoApply();
-      updateStatus(); saveProgress();
-    }
-    autoLast = ts;
-    autoRaf = requestAnimationFrame(tick);
-  };
-  autoRaf = requestAnimationFrame(tick);
+    autoY = autoNow();
+    updateStatus(); saveProgress();
+  }, 250);
 }
+
 function autoStop() {
-  const was = autoOn;
-  autoOn = false; cancelAnimationFrame(autoRaf);
+  if (!autoOn) {
+    $('#autoBar').classList.remove('show');
+    document.body.classList.remove('auto');
+    $('#autoBtn').textContent = '▶'; return;
+  }
+  const y = autoNow();
+  autoOn = false;
+  clearTimeout(autoTimer); clearInterval(autoStatusTimer);
+  const inner = innerOf(sv);
+  inner.style.transition = 'none';
+  inner.style.transform = '';
+  inner.style.willChange = '';
   sv.style.overflowY = '';
+  sv.scrollTop = y;
+  autoY = y;
   $('#autoBar').classList.remove('show');
   document.body.classList.remove('auto');
   $('#autoBtn').textContent = '▶';
-  if (was) saveProgress(true);
+  saveProgress(true);
 }
+
 $('#autoBtn').onclick = () => autoOn ? autoStop() : autoStart();
 $('#autoStop').onclick = autoStop;
 const speedLabel = () => $('#autoVal').textContent = S.autoPct + '%';
@@ -730,6 +791,7 @@ const setSpeed = v => {
   S.autoPct = clamp(+v, 0, 100);
   $('#autoSpeed').value = S.autoPct; $('#autoSpeed2').value = S.autoPct;
   speedLabel(); saveSettings();
+  if (autoOn) { autoY = autoNow(); autoArm(); }   // новая скорость — с текущего места
 };
 $('#autoSpeed').oninput = e => setSpeed(e.target.value);
 $('#autoSpeed2').oninput = e => setSpeed(e.target.value);
@@ -898,6 +960,8 @@ function relayout() {
   clearTimeout(relayoutT);
   relayoutT = setTimeout(() => {
     if (!book) return;
+    const wasAuto = autoOn;
+    if (wasAuto) autoStop();              // пересчёт вёрстки под идущим ходом не ведём
     if (pendingSt && Date.now() > pendingTill) pendingSt = null;
     if (pendingSt) {                      // пересчёты сразу после открытия книги
       const st = pendingSt;
@@ -905,6 +969,7 @@ function relayout() {
       [layers.prev, layers.cur, layers.next].forEach(l => l.dataset.win = '');
       sv.dataset.win = '';
       restoreState(st);
+      if (wasAuto) autoStart();
       return;
     }
     const g = globalProgress();
@@ -920,6 +985,7 @@ function relayout() {
       pi = clamp(Math.round(g * (total - 1)), 0, total - 1);
       render();
     }
+    if (wasAuto) autoStart();
   }, 60);
 }
 const bind = (sel, key, after) => $(sel).oninput = e => {
